@@ -104,7 +104,7 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
 
         // 【新增初始化 - 中文说明】从写入参数读取是否启用标签相关性与β强度
         _use_label_correlation = index_config.index_write_params->use_label_correlation; // 开关
-        _beta_strength = index_config.index_write_params->beta_strength; // 影响幅度
+        _beta_strength = index_config.index_write_params->beta_strength;                 // 影响幅度
 
         if (index_config.index_search_params != nullptr)
         {
@@ -789,7 +789,7 @@ bool Index<T, TagT, LabelT>::detect_common_filters(uint32_t point_id, bool searc
         }
     }
     // intersection empty; proceed to check the universal label logic
-    
+
     if (_use_universal_label)
     {
         if (!search_invocation)
@@ -1148,14 +1148,15 @@ void Index<T, TagT, LabelT>::occlude_list(const uint32_t location, std::vector<N
 
                 float djk = _data_store->get_distance(iter2->id, iter->id);
                 // 【新增β逻辑 - 中文说明】若启用标签相关性，则根据两个候选点的标签相似度计算β，调整djk
-                // β映射方式：beta = 1.0 + beta_strength * (corr - 0.5f) * 2  -> 将[0,1]映射到 [1-beta_strength, 1+beta_strength]
+                // β映射方式：beta = 1.0 + beta_strength * (corr - 0.5f) * 2  -> 将[0,1]映射到 [1-beta_strength,
+                // 1+beta_strength]
                 if (_use_label_correlation && _filtered_index)
                 {
                     float corr = compute_max_label_correlation(iter->id, iter2->id);
                     // 将相关性线性映射到β范围，保证β始终为正值
                     float beta = 1.0f + _beta_strength * (corr - 0.5f) * 2.0f;
                     if (beta < 0.1f)
-                        beta = 0.1f; // 防止过小导致数值不稳定
+                        beta = 0.1f;  // 防止过小导致数值不稳定
                     djk = djk / beta; // 使用β缩放几何距离
                 }
                 if (_dist_metric == diskann::Metric::L2 || _dist_metric == diskann::Metric::COSINE)
@@ -1180,8 +1181,7 @@ void Index<T, TagT, LabelT>::occlude_list(const uint32_t location, std::vector<N
 }
 
 // 【新增实现 - 中文说明】计算标签相关性矩阵（Ochiai）：统计每个标签出现次数与两标签共现次数
-template <typename T, typename TagT, typename LabelT>
-void Index<T, TagT, LabelT>::calculate_label_correlations()
+template <typename T, typename TagT, typename LabelT> void Index<T, TagT, LabelT>::calculate_label_correlations()
 {
     // 仅在启用过滤索引且标签数据可用时计算
     if (!_filtered_index)

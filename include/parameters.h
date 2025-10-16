@@ -31,12 +31,10 @@ class IndexWriteParameters
     // 【修改构造函数 - 中文说明】增加 use_label_correlation 与 beta_strength
     IndexWriteParameters(const uint32_t search_list_size, const uint32_t max_degree, const bool saturate_graph,
                          const uint32_t max_occlusion_size, const float alpha, const uint32_t num_threads,
-                         const uint32_t filter_list_size, const bool use_label_correlation,
-                         const float beta_strength)
+                         const uint32_t filter_list_size, const bool use_label_correlation, const float beta_strength)
         : search_list_size(search_list_size), max_degree(max_degree), saturate_graph(saturate_graph),
           max_occlusion_size(max_occlusion_size), alpha(alpha), num_threads(num_threads),
-          filter_list_size(filter_list_size), use_label_correlation(use_label_correlation),
-          beta_strength(beta_strength)
+          filter_list_size(filter_list_size), use_label_correlation(use_label_correlation), beta_strength(beta_strength)
     {
     }
 
