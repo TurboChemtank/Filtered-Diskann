@@ -102,6 +102,10 @@ Index<T, TagT, LabelT>::Index(const IndexConfig &index_config, std::shared_ptr<A
         _indexingThreads = index_config.index_write_params->num_threads;
         _saturate_graph = index_config.index_write_params->saturate_graph;
 
+        // 【新增初始化 - 中文说明】从写入参数读取是否启用标签相关性与β强度
+        _use_label_correlation = index_config.index_write_params->use_label_correlation; // 开关
+        _beta_strength = index_config.index_write_params->beta_strength; // 影响幅度
+
         if (index_config.index_search_params != nullptr)
         {
             uint32_t num_scratch_spaces = index_config.index_search_params->num_search_threads + _indexingThreads;
@@ -1143,6 +1147,17 @@ void Index<T, TagT, LabelT>::occlude_list(const uint32_t location, std::vector<N
                     continue;
 
                 float djk = _data_store->get_distance(iter2->id, iter->id);
+                // 【新增β逻辑 - 中文说明】若启用标签相关性，则根据两个候选点的标签相似度计算β，调整djk
+                // β映射方式：beta = 1.0 + beta_strength * (corr - 0.5f) * 2  -> 将[0,1]映射到 [1-beta_strength, 1+beta_strength]
+                if (_use_label_correlation && _filtered_index)
+                {
+                    float corr = compute_max_label_correlation(iter->id, iter2->id);
+                    // 将相关性线性映射到β范围，保证β始终为正值
+                    float beta = 1.0f + _beta_strength * (corr - 0.5f) * 2.0f;
+                    if (beta < 0.1f)
+                        beta = 0.1f; // 防止过小导致数值不稳定
+                    djk = djk / beta; // 使用β缩放几何距离
+                }
                 if (_dist_metric == diskann::Metric::L2 || _dist_metric == diskann::Metric::COSINE)
                 {
                     occlude_factor[t] = (djk == 0) ? std::numeric_limits<float>::max()
@@ -1162,6 +1177,93 @@ void Index<T, TagT, LabelT>::occlude_list(const uint32_t location, std::vector<N
         }
         cur_alpha *= 1.2f;
     }
+}
+
+// 【新增实现 - 中文说明】计算标签相关性矩阵（Ochiai）：统计每个标签出现次数与两标签共现次数
+template <typename T, typename TagT, typename LabelT>
+void Index<T, TagT, LabelT>::calculate_label_correlations()
+{
+    // 仅在启用过滤索引且标签数据可用时计算
+    if (!_filtered_index)
+        return;
+    _label_correlation_matrix.clear();
+
+    // 统计每个标签的出现次数
+    std::unordered_map<LabelT, uint64_t> label_counts;
+    // 统计标签对的共现次数（只统计有共现的对）
+    std::unordered_map<LabelT, std::unordered_map<LabelT, uint64_t>> co_occurrence_counts;
+
+    for (uint32_t point_id = 0; point_id < _nd; ++point_id)
+    {
+        const auto &labels = _location_to_labels[point_id];
+        // 对每个标签计数
+        for (const auto &la : labels)
+        {
+            label_counts[la] += 1;
+        }
+        // 对标签对计数（双向、对称）
+        for (size_t i = 0; i < labels.size(); ++i)
+        {
+            for (size_t j = i + 1; j < labels.size(); ++j)
+            {
+                LabelT a = labels[i];
+                LabelT b = labels[j];
+                co_occurrence_counts[a][b] += 1;
+                co_occurrence_counts[b][a] += 1;
+            }
+        }
+    }
+
+    // 计算Ochiai相关性：co_occ / sqrt(cntA * cntB)
+    for (const auto &kvA : co_occurrence_counts)
+    {
+        LabelT a = kvA.first;
+        auto cntA_it = label_counts.find(a);
+        if (cntA_it == label_counts.end() || cntA_it->second == 0)
+            continue;
+        for (const auto &kvB : kvA.second)
+        {
+            LabelT b = kvB.first;
+            auto cntB_it = label_counts.find(b);
+            if (cntB_it == label_counts.end() || cntB_it->second == 0)
+                continue;
+            double co = static_cast<double>(kvB.second);
+            double score = co / std::sqrt(static_cast<double>(cntA_it->second) * static_cast<double>(cntB_it->second));
+            float s = static_cast<float>(std::max(0.0, std::min(1.0, score)));
+            _label_correlation_matrix[a][b] = s;
+            _label_correlation_matrix[b][a] = s;
+        }
+    }
+}
+
+// 【新增实现 - 中文说明】返回两个点的标签集合之间的最大相关性分数（若无标签或无共现则为0）
+template <typename T, typename TagT, typename LabelT>
+float Index<T, TagT, LabelT>::compute_max_label_correlation(uint32_t a, uint32_t b) const
+{
+    if (a >= _location_to_labels.size() || b >= _location_to_labels.size())
+        return 0.0f;
+    const auto &la = _location_to_labels[a];
+    const auto &lb = _location_to_labels[b];
+    if (la.empty() || lb.empty())
+        return 0.0f;
+    float best = 0.0f;
+    for (const auto &xa : la)
+    {
+        auto itA = _label_correlation_matrix.find(xa);
+        if (itA == _label_correlation_matrix.end())
+            continue;
+        const auto &row = itA->second;
+        for (const auto &xb : lb)
+        {
+            auto it = row.find(xb);
+            if (it != row.end())
+            {
+                if (it->second > best)
+                    best = it->second;
+            }
+        }
+    }
+    return best;
 }
 
 template <typename T, typename TagT, typename LabelT>
@@ -1933,6 +2035,12 @@ void Index<T, TagT, LabelT>::build_filtered_index(const char *filename, const st
         }
         _label_to_start_id[curr_label] = best_medoid;
         _medoid_counts[best_medoid]++;
+    }
+
+    // 【新增调用 - 中文说明】在开始建图前计算标签相关性矩阵，供β动态剪枝使用
+    if (_use_label_correlation)
+    {
+        calculate_label_correlations();
     }
 
     this->build(filename, num_points_to_load, tags);
